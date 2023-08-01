@@ -1,0 +1,17 @@
+[package]
+name = "jef"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossterm = "0.26.1"
+jwalk = "0.8.1"
+nix = "0.26.2"
+open = "5.0.0"
+packed_simd = "0.3.8"
+rayon = "1.7.0"
+serde = { version = "1.0", features = ["derive"] }
+termion = "2.0.1"
+toml = "0.7.6"
+tui = "0.19.0"
+
