@@ -9,18 +9,28 @@
  * "main.rs" in 1.011s. Good luck understanding how it works...
  */
 
-use rayon::iter::{IntoParallelRefIterator,ParallelIterator};
+use std::{
+    time::Duration,
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
+};
+use rayon::iter::{
+    IntoParallelRefIterator,
+    ParallelIterator
+};
 use packed_simd::u8x16;
-use jwalk::WalkDir;
-use jwalk::DirEntry;
+use jwalk::{
+    WalkDir,
+    DirEntry
+};
+use crate::jef::flags::Flag;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
-use std::thread;
 
 type SharedList = Arc<Mutex<Vec<Arc<String>>>>;
+type SearchTerm = Arc<Mutex<String>>;
 
 macro_rules! hash_it {
     (|$s:expr, $num_c:ident, $rolling_hash:ident | $custom_code:block ) => {
@@ -41,79 +51,114 @@ macro_rules! hash_it {
         }
     };
 }
-pub fn init_browser(halt: Arc<Mutex<bool>>, search: Arc<Mutex<String>>) -> (thread::JoinHandle<()>, SharedList) {
+macro_rules! lock_as_mut {
+    (|$var:ident | $custom_code: block) => {
+        let $var = $var.clone();
+        if let Ok(mut $var) = $var.lock(){
+            $custom_code
+        };
+    };
+}
+
+macro_rules! lock_readonly {
+    (|$var:ident | $custom_code: block) => {
+        if let Ok($var) = $var.lock(){
+            $custom_code
+        };
+    };
+}
+
+macro_rules! check_env {
+    (|$prev_dir:ident| $custom_code: block) => {
+        if let Ok(current_dir) = std::env::current_dir() {
+            if current_dir != $prev_dir {
+                $custom_code
+                $prev_dir = current_dir;
+            }
+        }
+    };
+}
+macro_rules! check_env_search {
+    (|$prev_dir:ident, $prev_search_str:ident, $current_search:ident| $custom_code: block) => {
+        if let Ok(current_dir) = std::env::current_dir() {
+            if current_dir != $prev_dir || $current_search != $prev_search_str{
+                $custom_code
+                $prev_dir = current_dir;
+                $prev_search_str = $current_search;
+            }
+        }
+        
+    };
+}
+pub fn init_browser(flag: Arc<Mutex<Flag>>, search: SearchTerm) -> (thread::JoinHandle<()>, SharedList) {
     let shared_paths: SharedList = Arc::new(Mutex::new(Vec::new()));
-
     let thread_paths = shared_paths.clone();
+
     let browse_thread = thread::spawn(move || {
-        let mut prev_dir = std::env::current_dir().unwrap_or_default();
-        let mut prev_search_str = String::new();
-        for entry in WalkDir::new(".").min_depth(1).max_depth(1).sort(true) {
-            if let Ok(halt) = halt.lock(){
-                if *halt {
-                    break;
-                }                    
-            };
-            if let Some((path, file_name, depth)) = get_file_and_path(entry) {
-                let shared_paths = thread_paths.clone();
-                if let Ok(mut shared_paths) = shared_paths.lock() {
-                    shared_paths.push(path);
-                };
-            }
-        }
-        loop {
-            if let Ok(halt) = halt.lock(){
-                if *halt {
-                    break;
-                }                    
-            };
-            let mut current_search = String::new();
-            if let Ok(search_check) = search.lock() {
-                current_search = search_check.clone().to_lowercase();
-            };
-            if let Ok(current_dir) = std::env::current_dir() {
-                if current_dir != prev_dir || current_search != prev_search_str{
-                    let shared_paths = thread_paths.clone();
-                    if let Ok(mut shared_paths) = shared_paths.lock() {
-                        shared_paths.clear();
-                    };
-                    for entry in WalkDir::new(".").min_depth(1).max_depth(1).sort(true) {
-                        if let Ok(halt) = halt.lock(){
-                            if *halt {
-                                break;
-                            }                    
-                        };
-                        if current_search == ""{
-                            if let Some((path, file_name, depth)) = get_file_and_path(entry) {
-                                let shared_paths = thread_paths.clone();
-                                if let Ok(mut shared_paths) = shared_paths.lock() {
-                                    shared_paths.push(path);
-                                };
-                            }
-                        } else {
-                            if let Some((path, file_name, depth)) = get_file_and_path(entry) {
-                                let file_name = file_name.to_lowercase();
-                                if file_name.starts_with(&current_search) {
-                                    let shared_paths = thread_paths.clone();
-                                    if let Ok(mut shared_paths) = shared_paths.lock() {
-                                        shared_paths.push(path);
-                                    };
-                                }
-                            }
-                        }
-
-                    }
-
-                    prev_dir = current_dir;
-                    prev_search_str = current_search;
-                }
-            } else {
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
+        run_browser_thread(flag, thread_paths, search);
     });
 
     return (browse_thread, shared_paths);
+}
+
+
+fn run_browser_thread(flag: Arc<Mutex<Flag>>,
+                      thread_paths: SharedList,
+                      search: SearchTerm){
+    let mut prev_dir = std::env::current_dir().unwrap_or_default();
+    let mut prev_search_str = String::new();
+    for entry in WalkDir::new(".").min_depth(1).max_depth(1).sort(true) {
+        lock_readonly!(|flag|{
+            if matches!(*flag, Flag::Halt) {
+                break;
+            }                    
+        });
+        if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+            lock_as_mut!(|thread_paths|{
+                thread_paths.push(path);
+            });
+        }
+    }
+    loop {
+        lock_readonly!(|flag|{
+            if matches!(*flag, Flag::Halt) {
+                break;
+            }                    
+        });
+        let mut current_search = String::new();
+        lock_readonly!(|search|{
+            current_search = search.clone().to_lowercase();
+        });
+        check_env_search!(|prev_dir, prev_search_str, current_search|{
+            lock_as_mut!(|thread_paths|{
+                thread_paths.clear();
+            });
+            for entry in WalkDir::new(".").min_depth(1).max_depth(1).sort(true) {
+                lock_readonly!(|flag|{
+                    if matches!(*flag, Flag::Halt) {
+                        break;
+                    }                    
+                });
+                if current_search == ""{
+                    if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+                        lock_as_mut!(|thread_paths|{
+                            thread_paths.push(path);
+                        });
+                    }
+                } else {
+                    if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+                        let file_name = file_name.to_lowercase();
+                        if file_name.starts_with(&current_search) {
+                            lock_as_mut!(|thread_paths|{
+                                thread_paths.push(path);
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn get_file_and_path<C: jwalk::ClientState>(entry: Result<DirEntry<C>, jwalk::Error>) -> Option<(Arc<String>, Arc<String>, u16)> {
@@ -123,8 +168,7 @@ fn get_file_and_path<C: jwalk::ClientState>(entry: Result<DirEntry<C>, jwalk::Er
     }
 
     let entry = entry.unwrap();
-    let path = entry
-        .path();
+    let path = entry.path();
     let depth = entry.depth as u16;
     
 
@@ -169,41 +213,42 @@ impl FileMap {
     }
 }
 
-pub fn init_indexer(halt: Arc<Mutex<bool>>, root: &str) -> (thread::JoinHandle<()>, SharedFileMap) {
+pub fn init_indexer(flag: Arc<Mutex<Flag>>, root: &str) -> (thread::JoinHandle<()>, SharedFileMap) {
     let shared_file_map: SharedFileMap = Arc::new(Mutex::new(FileMap::new()));
 
     let root = root.to_string().clone();
     let thread_map = shared_file_map.clone();
     let indexer_thread = thread::spawn(move || {
-        let mut prev_dir = PathBuf::default();
-        loop{
-            if let Ok(halt) = halt.lock(){
-                if *halt {
-                    break;
-                }
-            };
-            if let Ok(current_dir) = std::env::current_dir() {
-                if current_dir != prev_dir {
-                    let thread_map = thread_map.clone();
-                    if let Ok(mut thread_map) = thread_map.lock(){
-                        thread_map.map.clear();
-                        thread_map.map.shrink_to(0);
-                    };
-                    index_directories(halt.clone(), &root, thread_map.clone());
-                    prev_dir = current_dir;
-                }
-            }
-            thread::sleep(Duration::from_millis(200));
-        }
+        run_index_thread(flag, thread_map, &root)
     });
 
     return (indexer_thread, shared_file_map);
 }
 
-use std::time::Duration;
+fn run_index_thread(flag: Arc<Mutex<Flag>>,
+                    thread_map: Arc<Mutex<FileMap>>,
+                    root: &str){
+    let mut prev_dir = PathBuf::default();
+    loop{
+        lock_readonly!(|flag|{
+            if matches!(*flag, Flag::Halt){
+                break;
+            }
+        });
+        check_env!(|prev_dir|{
+            lock_as_mut!(|thread_map|{
+                thread_map.map.clear();
+                thread_map.map.shrink_to(0);
+            });
+            index_directories(flag.clone(), &root, thread_map.clone());
+        });
+        thread::sleep(Duration::from_millis(200));
+    }
+}
 
 
-pub fn init_index_search(halt: Arc<Mutex<bool>>, 
+
+pub fn init_index_search(flag: Arc<Mutex<Flag>>, 
                          shared_file_map: SharedFileMap, 
                          search: Arc<Mutex<String>>) -> (thread::JoinHandle<()>, SharedList) {
     let shared_paths: SharedList = Arc::new(Mutex::new(Vec::new()));
@@ -213,145 +258,103 @@ pub fn init_index_search(halt: Arc<Mutex<bool>>,
     let thread_paths = shared_paths.clone();
 
     let search_thread = thread::spawn(move ||{
-        let mut last_search = String::new();
-        let mut last_size:usize = 0;
-        loop{
-            if let Ok(halt) = halt.lock(){
-                if *halt {
-                    break;
-                }                    
-            };
-            if let Ok(search) = search.lock(){
-                let mut stack: u16 = 0;
-                let mut size: usize = 0;
-                if let Ok(shared_file_map) = shared_file_map.lock() {
-                    stack = shared_file_map.stack;
-                    size = shared_file_map.map.len();
-                };
-                if *search != last_search || size != last_size{
-                    let thread_paths = thread_paths.clone();
-                    if let Ok(mut thread_paths) = thread_paths.lock(){
-                        thread_paths.clear();
-                    };
-                    last_search = search.clone();
-                    last_size = size;
-                    let hashes = get_possible_hashes(stack, &search);
-                    for hash in hashes {
-                        check_index(thread_map.clone(), thread_paths.clone(), &hash, &search);
-                    }
-                }
-            };
-            thread::sleep(Duration::from_millis(150));
-        }
+        run_search_thread(flag, search, shared_file_map, thread_paths, thread_map);
     });
     return (search_thread, shared_paths);
 }
 
+fn run_search_thread(flag: Arc<Mutex<Flag>>,
+                     search: Arc<Mutex<String>>,
+                     shared_file_map: SharedFileMap,
+                     thread_paths: Arc<Mutex<Vec<Arc<String>>>>,
+                     thread_map: Arc<Mutex<FileMap>>){
+    let mut last_search = String::new();
+    let mut last_size:usize = 0;
+    loop{
+        lock_readonly!(|flag|{
+            if matches!(*flag, Flag::Halt){
+                break;
+            }
+        });
+        lock_readonly!(|search|{
+            let mut stack: u16 = 0;
+            let mut size: usize = 0;
+            lock_readonly!(|shared_file_map|{
+                stack = shared_file_map.stack;
+                size = shared_file_map.map.len();
+            });
+            if *search != last_search || size != last_size{
+                lock_as_mut!(|thread_paths|{
+                    thread_paths.clear();
+                });
+                last_search = search.clone();
+                last_size = size;
+                let hashes = get_possible_hashes(stack, &search);
+                for hash in hashes {
+                    check_index(thread_map.clone(), thread_paths.clone(), &hash, &search);
+                }
+            }
+
+        });
+        thread::sleep(Duration::from_millis(150));
+    }
+
+}
+
+
 fn check_index(shared_file_map: SharedFileMap, shared_paths: SharedList, hash: &u64, search: &str) {
-    let shared_file_map = shared_file_map.clone();
-    if let Ok(file_map) = shared_file_map.lock(){
-        if let Some(str_ptr) = file_map.map.get(&hash){
-            let str_ptr = str_ptr.clone();
-            if let Ok(str_ptr) = str_ptr.lock(){
+    lock_readonly!(|shared_file_map|{
+        if let Some(str_ptr) = shared_file_map.map.get(&hash){
+            lock_readonly!(|str_ptr|{
                 str_ptr.par_iter().for_each(|dir| {
                     if starts_with_prefix_simd(last_chars_until_forward_slash(&dir),search) {
                         shared_paths.lock().unwrap().push(dir.clone());
                     }
                 });
-            };
-        }
-    };
-}
-
-pub fn get_dirs_2(max_stack: u16, file_map: HashMap<u64, SharedList>, s: &str) -> Arc<Mutex<Vec<Arc<String>>>> {
-    let dirs: SharedList = Arc::new(Mutex::new(Vec::new()));
-    let hashes = get_possible_hashes(max_stack, s);
-    hashes.par_iter().for_each(|hash| {
-        if let Some(str_ptr) = file_map.get(&hash){
-            let str_ptr = str_ptr.clone();
-            if let Ok(str_ptr) = str_ptr.lock(){
-                str_ptr.par_iter().for_each(|dir| {
-                    if starts_with_prefix_simd(last_chars_until_forward_slash(&dir),s) {
-                        dirs.lock().unwrap().push(dir.clone());
-                    }
-                });
-            };
+            });
         }
     });
-    return dirs;
 }
-fn index_directories(halt: Arc<Mutex<bool>>, root: &str, shared_file_map: SharedFileMap) { 
+
+fn index_directories(flag: Arc<Mutex<Flag>>, root: &str, shared_file_map: SharedFileMap) { 
     for entry in WalkDir::new(root).skip_hidden(false) {
-        if let Ok(halt) = halt.lock(){
-            if *halt {
+        lock_readonly!(|flag|{
+            if matches!(*flag, Flag::Halt) {
                 break;
-            }                    
-        };
+            }
+        });
         if let Some((path_as_string, file_name, stack)) = get_file_and_path(entry) {
             let shared_file_map = shared_file_map.clone();
             index_single_dir(shared_file_map, path_as_string, file_name, stack);
         }
     }
-    let shared_file_map = shared_file_map.clone();
-    if let Ok(mut file_map) = shared_file_map.lock() {
-        file_map.done_indexing = true;
-    };
+    lock_readonly!(|shared_file_map|{
+        shared_file_map.done_indexing;
+    });
 }
+
 fn index_single_dir(file_map: SharedFileMap, path: Arc<String>, file_name: Arc<String>, stack: u16) {
-        if let Ok(mut file_map) = file_map.lock(){
-            if stack > file_map.stack {
-                file_map.stack = stack;
+    lock_as_mut!(|file_map|{
+        if stack > file_map.stack {
+            file_map.stack = stack;
+        }
+        let hashset = get_hashset(stack, &*file_name);
+        for hash in hashset {
+            if let Some(list) = file_map.map.get(&hash) {
+                lock_as_mut!(|list|{
+                    list.push(path.clone());
+                });
+            }else{
+                let list: Vec<Arc<String>> = vec![path.clone()];
+                let list = Arc::new(Mutex::new(list));
+                file_map.map.insert(hash, list);
             }
-            let hashset = get_hashset(stack, &*file_name);
-            for hash in hashset {
-                if let Some(list) = file_map.map.get(&hash) {
-                    let list = list.clone();
-                    {
-                        if let Ok(mut list) = list.lock() {
-                            list.push(path.clone());
-                        };
-                    }
-                }else{
-                    let list: Vec<Arc<String>> = vec![path.clone()];
-                    let list = Arc::new(Mutex::new(list));
-                    file_map.map.insert(hash, list);
-                }
-            }
-        };
+        }
+    });
 }
 
 
 //indexes 48gb in under 4s on ssd. lol
-pub fn index_directories_2(root: &str) -> (u16, HashMap<u64, SharedList>) {
-    let mut file_map: HashMap<u64, SharedList> = HashMap::new();
-    let mut max_stack: u16 = 0;
-
-    for entry in WalkDir::new(root).skip_hidden(false) {
-        if let Some((path_as_string, file_name, stack)) = get_file_and_path(entry) {
-            //println!("{:?}", path_as_string);
-            //let stack = count_stack_simd(path_as_string);
-            if stack > max_stack {
-                max_stack = stack;
-            }
-            let hashset = get_hashset(stack, &*file_name);
-            for hash in hashset {
-                if let Some(list) = file_map.get(&hash) {
-                    let list = list.clone();
-                    {
-                        if let Ok(mut list) = list.lock() {
-                            list.push(path_as_string.clone());
-                        };
-                    }
-                }else{
-                    let list: Vec<Arc<String>> = vec![path_as_string.clone()];
-                    let list = Arc::new(Mutex::new(list));
-                    file_map.insert(hash, list);
-                }
-            }
-        }
-    }
-    return (max_stack, file_map);
-}
 
 pub fn last_chars_until_forward_slash(s: &str) -> &str {
     let slash_byte = b'/';

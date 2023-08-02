@@ -1,62 +1,34 @@
 use jwalk::DirEntry;
-use jwalk::WalkDir;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, size, SetSize},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, size},
 };
-use tui::layout::Rect;
-use std::fs::FileType;
 use std::{
     error::Error,
-    env,
     io,
     time::{Duration, Instant},
-    process::{Command, exit},
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Corner, Direction, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
-use nix::unistd::{getpgid, getuid};
 
 use std::sync::{Arc, Mutex};
 
-use crate::jef::opener::{
-    open,
-    returning_terminal_at,
+use crate::jef::{
+    opener::{open, returning_terminal_at, open_terminal},
+    flags::Flag,
 };
+
+use super::opener::special_open;
 
 type SharedList = Arc<Mutex<Vec<Arc<String>>>>;
 
-pub fn exit_to_terminal_at(path: &str) {
-    if let Err(err) = env::set_current_dir(path) {
-        //TODO logging
-        //std::process::exit(1);
-    } else {
-        if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
-            let status = Command::new(user.shell)
-                .status()
-                .expect("Failed to open shell");
-        }
-
-        match getpgid(None) {
-            Ok(pgid) => {
-                println!("Exiting JEF");
-                let _ = nix::sys::signal::killpg(pgid,None);
-            }
-            Err(err) => {
-                exit(1);
-            }
-        }
-        // Terminate the original Rust app
-        exit(0);
-    }
-}
 
 struct StatefulList {
     state: ListState,
@@ -109,9 +81,6 @@ impl StatefulList {
         self.state.select(Some(i));
     }
 
-    fn unselect(&mut self) {
-        self.state.select(None);
-    }
 }
 
 /// This struct holds the current state of the app. In particular, it has the `items` field which is a wrapper
@@ -133,23 +102,23 @@ enum AppState {
     Exit,
 }
 struct App {
+    flag: Arc<Mutex<Flag>>,
     items: StatefulList,
     browser_items: StatefulList,
     search_term: Arc<Mutex<String>>,
     app_state: AppState,
-    root: String,
     cmd: String,
     last_char: Option<char>,
 }
 
 impl App {
-    fn from(items: SharedList, browser_paths: SharedList, search_term: Arc<Mutex<String>>) -> App {
+    fn from(flag: Arc<Mutex<Flag>>, items: SharedList, browser_paths: SharedList, search_term: Arc<Mutex<String>>) -> App {
         App {
+            flag,
             items: StatefulList::with_items(items),
             browser_items: StatefulList::with_items(browser_paths),
             search_term,
             app_state: AppState::Normal,
-            root: String::from("."),
             cmd: String::new(),
             last_char: None,
         }
@@ -161,7 +130,7 @@ impl App {
     }
 }
 
-pub fn explorer(paths: SharedList, browser_paths: SharedList, search_term: Arc<Mutex<String>>) -> Result<(), Box<dyn Error>> {
+pub fn explorer(flag: Arc<Mutex<Flag>>, paths: SharedList, browser_paths: SharedList, search_term: Arc<Mutex<String>>) -> Result<(), Box<dyn Error>> {
     // setup terminal
     let (cols, rows) = size()?;
     enable_raw_mode()?;
@@ -172,7 +141,7 @@ pub fn explorer(paths: SharedList, browser_paths: SharedList, search_term: Arc<M
 
     // create app and run it
     let tick_rate = Duration::from_millis(100);
-    let app = App::from(paths, browser_paths, search_term);
+    let app = App::from(flag, paths, browser_paths, search_term);
     let res = run_app(&mut terminal, app, tick_rate);
 
     // restore terminal
@@ -228,6 +197,7 @@ fn run_app<B: Backend>(
     }
     return Ok(());
 }
+
 fn handle_key_match(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
@@ -344,6 +314,15 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
         KeyCode::Char('!') => {
             app.cmd.clear();
             app.app_state = AppState::Shell;
+        },
+        KeyCode::Char('$') => {
+            if let Ok(current_dir) = std::env::current_dir() {
+                let current_dir = current_dir.to_str().unwrap_or(".");
+                special_open(terminal);
+            }
+        },
+        KeyCode::Char('#') => {
+            open_terminal(terminal);
         },
         KeyCode::Char('/') => {
             app.app_state = AppState::Match;
