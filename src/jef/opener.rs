@@ -15,6 +15,16 @@ use std::{
     fs,
     collections::HashSet,
 };
+const DEFAULT_CONFIG: &str = r#"
+[[app_rule]]
+    app = "vim"
+    tui = true
+    file_types = ["txt"]
+
+[special_rule]
+    app = "vim"
+"#;
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
@@ -43,17 +53,9 @@ impl Config{
         } 
         return None;
     } 
+
     pub fn default_config() -> Config{
-        let mut config: Config = toml::from_str(r#"
-[[app_rule]]
-    app = "vim"
-    tui = true
-    file_types = ["txt"]
-
-[special_rule]
-    app = "vim"
-                                "#).unwrap();
-
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).unwrap();
         if let Some(home) = env::var_os("HOME"){
             if let Ok(home) = home.into_string() {
                 let home = format!("{}/.config/jef/jef.toml",home);
@@ -64,95 +66,91 @@ impl Config{
         }
         return config;
     }
-
 }
 
 pub fn open_terminal<B: Backend>(terminal: &mut Terminal<B>) {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
+    let _ = terminal.show_cursor();
 
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
+    }
     if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
-        disable_raw_mode().unwrap();
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
-        let _ = terminal.show_cursor();
-
-            //.arg(command)
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
         println!("This shell was spawned from JEF! Use exit command to return.");
-        let _status = Command::new(user.shell)
+        Command::new(user.shell)
             .status()
             .expect("Failed to open shell");
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
-        
-        let _ = enable_raw_mode();
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
+    }
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
+    
+    let _ = enable_raw_mode();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
     }
 }
 
 pub fn special_open<B: Backend>(terminal: &mut Terminal<B>){
     let config = Config::default_config();
-    if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
-        disable_raw_mode().unwrap();
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
-        let _ = terminal.show_cursor();
+    disable_raw_mode().unwrap();
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
+    let _ = terminal.show_cursor();
 
-        //.arg(command)
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
+    }
+    if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
         let _status = Command::new(user.shell)
             .arg("-c")
             .arg(config.special_rule.app)
             .status()
             .expect("Failed to open special rule");
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-        );
-        let _ = enable_raw_mode();
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
+    }
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+    );
+    let _ = enable_raw_mode();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
     }
 }
 
 pub fn open<B: Backend>(terminal: &mut Terminal<B>, path: String){
     let extension = std::path::Path::new(&path);
     let extension = extension.extension();
-    let extension = extension.and_then(std::ffi::OsStr::to_str).unwrap();
-
-    let mut config = Config::default_config();
-    if let Some(app_rule) = config.app_from_type(extension.to_string()){
-        if app_rule.tui {
-            open_tui_app(terminal, app_rule.app, &path);
+    if let Some(extension) = extension.and_then(std::ffi::OsStr::to_str) {
+        let mut config = Config::default_config();
+        if let Some(app_rule) = config.app_from_type(extension.to_string()){
+            if app_rule.tui {
+                open_tui_app(terminal, app_rule.app, &path);
+            } else {
+                let _ = open::with_detached(path, app_rule.app);            
+            }
         } else {
-            let _ = open::with_detached(path, app_rule.app);            
+            let _ = open::that_detached(path);
         }
-    } else {
-        let _ = open::that_detached(path);
     }
 }
 
 pub fn open_tui_app<B: Backend>(terminal: &mut Terminal<B>,command: String, path: &String){
-    disable_raw_mode().unwrap();
+    let _ = disable_raw_mode();
     let _ = execute!(
         std::io::stdout(),
         LeaveAlternateScreen,
@@ -170,21 +168,19 @@ pub fn open_tui_app<B: Backend>(terminal: &mut Terminal<B>,command: String, path
 }
 
 pub fn returning_terminal_at<B: Backend>(terminal: &mut Terminal<B>, command: &String) {
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
+    let _ = terminal.show_cursor();
 
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
+    }
     if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
-        disable_raw_mode().unwrap();
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        );
-        let _ = terminal.show_cursor();
-
-            //.arg(command)
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
+        let _ = disable_raw_mode();
         println!("!{}", command);
         let _status = Command::new(user.shell)
             .arg("-c")
@@ -194,16 +190,16 @@ pub fn returning_terminal_at<B: Backend>(terminal: &mut Terminal<B>, command: &S
         let mut result = String::new();
         println!("\n Press enter to continue...");
         std::io::stdin().read_line(&mut result).expect("failed to readline");
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-        );
-        
-        let _ = enable_raw_mode();
-        let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
-        if let Ok(size) = terminal.size() {
-            let _ = terminal.resize(size);
-        }
+    }
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+    );
+    
+    let _ = enable_raw_mode();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    if let Ok(size) = terminal.size() {
+        let _ = terminal.resize(size);
     }
 }
 

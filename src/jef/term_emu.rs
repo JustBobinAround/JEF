@@ -1,8 +1,7 @@
-use jwalk::DirEntry;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, size},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
     error::Error,
@@ -28,6 +27,16 @@ use crate::jef::{
 use super::opener::special_open;
 
 type SharedList = Arc<Mutex<Vec<Arc<String>>>>;
+
+macro_rules! write_bar {
+    ($var:ident, $to_write:expr) => {
+        $var = vec![
+            Spans::from(vec![
+                Span::raw($to_write),
+            ]),
+        ]; 
+    };
+}
 
 
 struct StatefulList {
@@ -124,6 +133,40 @@ impl App {
         }
     }
 
+    pub fn get_selected_item<B: Backend>(&mut self, terminal:&mut Terminal<B>) {
+        let items = self.browser_items.items.clone();
+        let selected = self.browser_items.state.selected().unwrap_or_default();
+        if let Ok(items) = items.lock(){ 
+            if let Some(item) = items.get(selected){
+                let item = &*item.clone();
+                self.check_and_open(terminal, item);
+            }
+        };
+    }
+    
+    pub fn get_selected_browser_item<B: Backend>(&mut self, terminal: &mut Terminal<B>) {
+        let items = self.items.items.clone();
+        let selected = self.items.state.selected().unwrap_or_default();
+        if let Ok(items) = items.lock(){ 
+            if let Some(item) = items.get(selected){
+                let item = &*item.clone();
+                self.check_and_open(terminal, item);
+            }
+        };
+    }
+
+    fn check_and_open<B: Backend>(&mut self, terminal:&mut Terminal<B>, item: &String) {
+        if let Ok(metadata) = std::fs::metadata(item){
+            self.app_state = AppState::Normal;
+            if metadata.is_dir(){
+                std::env::set_current_dir(item).unwrap();
+            }
+            if metadata.is_file() {
+                open(terminal, item.clone());
+            }
+        }
+    }
+
     /// Rotate through the event list.
     /// This only exists to simulate some kind of "progress"
     fn on_tick(&mut self) {
@@ -132,7 +175,6 @@ impl App {
 
 pub fn explorer(flag: Arc<Mutex<Flag>>, paths: SharedList, browser_paths: SharedList, search_term: Arc<Mutex<String>>) -> Result<(), Box<dyn Error>> {
     // setup terminal
-    let (cols, rows) = size()?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -287,7 +329,7 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
             let mut count = 1;
             match app.cmd.parse::<i32>() {
                 Ok(n) => count = n,
-                Err(e) => {},
+                Err(_e) => {},
             }
             for _i in 0..count{
                 app.items.next();
@@ -299,7 +341,7 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
             let mut count = 1;
             match app.cmd.parse::<i32>() {
                 Ok(n) => count = n,
-                Err(e) => {},
+                Err(_e) => {},
             }
             for _i in 0..count{
                 app.items.previous(); 
@@ -316,10 +358,7 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
             app.app_state = AppState::Shell;
         },
         KeyCode::Char('$') => {
-            if let Ok(current_dir) = std::env::current_dir() {
-                let current_dir = current_dir.to_str().unwrap_or(".");
-                special_open(terminal);
-            }
+            special_open(terminal);
         },
         KeyCode::Char('#') => {
             open_terminal(terminal);
@@ -333,13 +372,23 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
             }
         },
         KeyCode::Enter => {
-            check_selection(terminal, app);
-            if let Ok(mut search) = app.search_term.lock(){
-                search.clear();
-            };
+            match app.cmd.parse::<i32>() {
+                Ok(n) =>{
+                    for _i in 0..n{
+                        app.items.next();
+                        app.browser_items.next();
+                    }
+                },
+                Err(_e) => {
+                    check_selection(terminal, app);
+                    if let Ok(mut search) = app.search_term.lock(){
+                        search.clear();
+                    };
+                },
+            }
         },
         KeyCode::Backspace=> {
-            std::env::set_current_dir("..").unwrap();
+            let _ = std::env::set_current_dir("..");
         },
         KeyCode::Down => app.items.next(),
         KeyCode::Up => app.items.previous(),
@@ -347,42 +396,9 @@ fn handle_key_normal<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, key:
     }
 }
 fn check_selection<B: Backend>(terminal: &mut Terminal<B>, app: &mut App){
-    let items = app.browser_items.items.clone();
-    if let Ok(items) = items.lock(){ 
-        if let Some(selected) = app.browser_items.state.selected(){
-            if let Some(item) = items.get(selected){
-                let item = &*item.clone();
-                if let Ok(metadata) = std::fs::metadata(item){
-                    app.app_state = AppState::Normal;
-                    if metadata.is_dir(){
-                        std::env::set_current_dir(item).unwrap();
-                    }
-                    if metadata.is_file() {
-                        open(terminal, item.clone());
-                    }
-                }
-            }
-        }
-    };
-    let items = app.items.items.clone();
-    if let Ok(items) = items.lock(){ 
-        if let Some(selected) = app.items.state.selected(){
-            if let Some(item) = items.get(selected){
-                let item = &*item.clone();
-                if let Ok(metadata) = std::fs::metadata(item){
-                    app.app_state = AppState::Normal;
-                    if metadata.is_dir(){
-                        std::env::set_current_dir(item).unwrap();
-                    }
-                    if metadata.is_file() {
-                        open(terminal, item.clone());
-                    }
-                }
-            }
-        }
-    };
+    app.get_selected_item(terminal);
+    app.get_selected_browser_item(terminal);
     reset_selection(app);
-
 }
 
 fn parse_cmd_num(app: &mut App, c: char) -> bool {
@@ -441,6 +457,7 @@ fn handle_shell<B: Backend>(terminal:&mut Terminal<B>, app: &mut App) {
     returning_terminal_at(terminal, &app.cmd);
     app.app_state = AppState::Normal;
 }
+
 fn handle_cmd(app: &mut App) {
     match &*app.cmd {
         "wq" => {app.app_state = AppState::Exit},
@@ -454,7 +471,7 @@ fn handle_cmd(app: &mut App) {
 
 fn normal_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
     let height = f.size().height as u32;
-    let width = f.size().width as u32;
+    let _width = f.size().width as u32;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Ratio(height - 1, height), 
@@ -487,7 +504,6 @@ fn normal_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
             i += 1;
         }
     };
-    // Create a List from all list items and highlight the currently selected one
 
 
     let current_dir = std::env::current_dir().unwrap_or_default();
@@ -505,43 +521,23 @@ fn normal_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
     let mut text = Vec::new();
     match app.app_state {
         AppState::Normal => {
-            text = vec![
-                Spans::from(vec![
-                    Span::raw(format!("NORMAL")),
-                ]),
-            ];
+            write_bar!(text, format!("NORMAL"));
         },
         AppState::Match => {
             if let Ok(search_term) = app.search_term.lock(){
-                text = vec![
-                    Spans::from(vec![
-                        Span::raw(format!("/{}", &search_term)),
-                    ]),
-                ];
+                write_bar!(text, format!("/{}", &search_term));
             };
         },
         AppState::MatchNorm => {
             if let Ok(search_term) = app.search_term.lock(){
-                text = vec![
-                    Spans::from(vec![
-                        Span::raw(format!("/{}", &search_term)),
-                    ]),
-                ];
+                write_bar!(text, format!("/{}", &search_term));
             };
         },
         AppState::Command => {
-            text = vec![
-                Spans::from(vec![
-                    Span::raw(format!(":{}",app.cmd)),
-                ]),
-            ];
+            write_bar!(text, format!(":{}",app.cmd));
         },
         AppState::Shell => {
-            text = vec![
-                Spans::from(vec![
-                    Span::raw(format!("!{}",app.cmd)),
-                ]),
-            ];
+            write_bar!(text, format!("!{}",app.cmd));
         },
         _ => {},
     }
@@ -553,37 +549,38 @@ fn normal_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
     f.render_stateful_widget(items, chunks[0], &mut app.browser_items.state);
     f.render_widget(label, chunks[1]);
 }
- 
-fn get_file_and_path<C: jwalk::ClientState>(entry: Result<DirEntry<C>, jwalk::Error>) -> Option<String> {
 
-    if entry.is_err() {
-        return None;
+
+fn status_bar<B: Backend>(terminal: Terminal<B>, app: &mut App) -> Vec<Spans<'static>>{
+    let mut text = Vec::new();
+    match app.app_state {
+        AppState::Normal => {
+            write_bar!(text, format!(""));
+        },
+        AppState::Match => {
+            if let Ok(search_term) = app.search_term.lock(){
+                write_bar!(text, format!("/{}", &search_term));
+            };
+        },
+        AppState::MatchNorm => {
+            if let Ok(search_term) = app.search_term.lock(){
+                write_bar!(text, format!("/{}", &search_term));
+            };
+        },
+        AppState::Command => {
+            write_bar!(text, format!(":{}",app.cmd));
+        },
+        AppState::Shell => {
+            write_bar!(text, format!("!{}",app.cmd));
+        },
+        _ => {},
     }
-
-    let entry = entry.unwrap();
-    let path = entry
-        .path();
-    
-
-    if let Some(file_name) = path.file_name() {
-        let path_str: String;
-        let file_name_str: Arc<String>;
-        if let Some(path) = path.to_str() {
-            path_str = path.to_string();
-        }else{
-            return None;
-        }
-
-        return Some(path_str);
-    } else {
-        return None;
-    }
-
+    return text;
 }
-
+ 
 fn fuzzy_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
     let height = f.size().height as u32;
-    let width = f.size().width as u32;
+    let _width = f.size().width as u32;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Ratio(height - 1, height), 
@@ -622,11 +619,7 @@ fn fuzzy_widget<B: Backend> (f: &mut Frame<B>, app: &mut App) {
         ]),
     ];
     if let Ok(search_term) = app.search_term.lock(){
-        text = vec![
-            Spans::from(vec![
-                Span::raw(format!("FIND:{}", &search_term)),
-            ]),
-        ];
+        write_bar!(text, format!("FIND:{}", &search_term));
     };
     let current_dir = std::env::current_dir().unwrap_or_default();
     let title = format!("| {:?} |", current_dir);

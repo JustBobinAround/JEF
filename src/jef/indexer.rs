@@ -51,6 +51,19 @@ macro_rules! hash_it {
         }
     };
 }
+macro_rules! halting_loop {
+    (|$var: ident| $custom_code: block) => {
+        loop {
+            lock_readonly!(|$var|{
+                if matches!(*$var, Flag::Halt) {
+                    break;
+                }                    
+            });
+            $custom_code
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+}
 macro_rules! lock_as_mut {
     (|$var:ident | $custom_code: block) => {
         let $var = $var.clone();
@@ -90,6 +103,7 @@ macro_rules! check_env_search {
         
     };
 }
+
 pub fn init_browser(flag: Arc<Mutex<Flag>>, search: SearchTerm) -> (thread::JoinHandle<()>, SharedList) {
     let shared_paths: SharedList = Arc::new(Mutex::new(Vec::new()));
     let thread_paths = shared_paths.clone();
@@ -113,18 +127,13 @@ fn run_browser_thread(flag: Arc<Mutex<Flag>>,
                 break;
             }                    
         });
-        if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+        if let Some((path, _file_name, _depth)) = get_file_and_path(entry) {
             lock_as_mut!(|thread_paths|{
                 thread_paths.push(path);
             });
         }
     }
-    loop {
-        lock_readonly!(|flag|{
-            if matches!(*flag, Flag::Halt) {
-                break;
-            }                    
-        });
+    halting_loop!(|flag|{
         let mut current_search = String::new();
         lock_readonly!(|search|{
             current_search = search.clone().to_lowercase();
@@ -140,13 +149,13 @@ fn run_browser_thread(flag: Arc<Mutex<Flag>>,
                     }                    
                 });
                 if current_search == ""{
-                    if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+                    if let Some((path, _file_name, _depth)) = get_file_and_path(entry) {
                         lock_as_mut!(|thread_paths|{
                             thread_paths.push(path);
                         });
                     }
                 } else {
-                    if let Some((path, file_name, depth)) = get_file_and_path(entry) {
+                    if let Some((path, file_name, _depth)) = get_file_and_path(entry) {
                         let file_name = file_name.to_lowercase();
                         if file_name.starts_with(&current_search) {
                             lock_as_mut!(|thread_paths|{
@@ -157,8 +166,7 @@ fn run_browser_thread(flag: Arc<Mutex<Flag>>,
                 }
             }
         });
-        thread::sleep(Duration::from_millis(100));
-    }
+    });
 }
 
 fn get_file_and_path<C: jwalk::ClientState>(entry: Result<DirEntry<C>, jwalk::Error>) -> Option<(Arc<String>, Arc<String>, u16)> {
@@ -229,12 +237,7 @@ fn run_index_thread(flag: Arc<Mutex<Flag>>,
                     thread_map: Arc<Mutex<FileMap>>,
                     root: &str){
     let mut prev_dir = PathBuf::default();
-    loop{
-        lock_readonly!(|flag|{
-            if matches!(*flag, Flag::Halt){
-                break;
-            }
-        });
+    halting_loop!(|flag|{
         check_env!(|prev_dir|{
             lock_as_mut!(|thread_map|{
                 thread_map.map.clear();
@@ -242,8 +245,7 @@ fn run_index_thread(flag: Arc<Mutex<Flag>>,
             });
             index_directories(flag.clone(), &root, thread_map.clone());
         });
-        thread::sleep(Duration::from_millis(200));
-    }
+    });
 }
 
 
@@ -270,12 +272,7 @@ fn run_search_thread(flag: Arc<Mutex<Flag>>,
                      thread_map: Arc<Mutex<FileMap>>){
     let mut last_search = String::new();
     let mut last_size:usize = 0;
-    loop{
-        lock_readonly!(|flag|{
-            if matches!(*flag, Flag::Halt){
-                break;
-            }
-        });
+    halting_loop!(|flag|{
         lock_readonly!(|search|{
             let mut stack: u16 = 0;
             let mut size: usize = 0;
@@ -294,11 +291,8 @@ fn run_search_thread(flag: Arc<Mutex<Flag>>,
                     check_index(thread_map.clone(), thread_paths.clone(), &hash, &search);
                 }
             }
-
         });
-        thread::sleep(Duration::from_millis(150));
-    }
-
+    });
 }
 
 
@@ -459,4 +453,3 @@ pub fn starts_with_prefix_simd(s: &str, prefix: &str) -> bool {
     }
 }
 
-//searched a 48gb index in 1.011s for main.rs. This is crazy
