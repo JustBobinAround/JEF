@@ -1,4 +1,4 @@
-# JEF - Just Explore Files
+# JEF - Jef Explore Files
 
 **JEF** is a highly configurable file manager designed for terminal power users who demand a fast and versatile file exploration experience. With its blazing-fast fuzzy finder and extensive file-opening capabilities, JEF simplifies the task of navigating and managing your files efficiently. The program is written in Rust, using the multi-threading library Rayon for its indexing and a custom hashing algorithm to make a very fast fuzzy finder.
 
